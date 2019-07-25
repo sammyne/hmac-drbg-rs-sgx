@@ -1,26 +1,47 @@
 #![no_std]
 
 extern crate hmac;
-extern crate digest;
 extern crate generic_array;
 
-use digest::{Input, BlockInput, FixedOutput};
+use hmac::digest::{Input, BlockInput, FixedOutput, Reset};
 use generic_array::{ArrayLength, GenericArray};
-use hmac::{Mac, Hmac, MacResult};
+use hmac::{Mac, Hmac};
+use hmac::crypto_mac::MacResult;
 
 pub struct HmacDRBG<D>
-    where D: Input + BlockInput + FixedOutput + Default,
+    where D: Input + BlockInput + FixedOutput + Default + Reset + Clone,
           D::BlockSize: ArrayLength<u8>,
           D::OutputSize: ArrayLength<u8>
 {
-    digest: D,
+    //digest: D,
     k: MacResult<D::OutputSize>,
     v: MacResult<D::OutputSize>,
     count: usize,
 }
 
-impl<D> HmacDRBG<D>
+/// The key that Hmac processes must be the same as the block size of the
+/// underlying Digest. If the provided key is smaller than that, we just pad it
+/// with zeros. If its larger, we hash it and then pad it with zeros.
+fn expand_key<D>(key: &[u8]) -> GenericArray<u8, D::BlockSize>
     where D: Input + BlockInput + FixedOutput + Default,
+          D::BlockSize: ArrayLength<u8>
+{
+    let mut exp_key = GenericArray::default();
+
+    if key.len() <= exp_key.len() {
+        exp_key[..key.len()].copy_from_slice(key);
+    } else {
+        let mut digest = D::default();
+        digest.input(key);
+        let output = digest.fixed_result();
+        let n = core::cmp::min(output.len(), exp_key.len());
+        exp_key[..n].copy_from_slice(&output[..n]);
+    }
+    exp_key
+}
+
+impl<D> HmacDRBG<D>
+    where D: Input + BlockInput + FixedOutput + Default + Reset + Clone,
           D::BlockSize: ArrayLength<u8>,
           D::OutputSize: ArrayLength<u8>
 {
@@ -37,7 +58,7 @@ impl<D> HmacDRBG<D>
         }
 
         let mut this = Self {
-            digest: D::default(),
+            //digest: D::default(),
             k: MacResult::new(k),
             v: MacResult::new(v),
             count: 0,
@@ -71,13 +92,13 @@ impl<D> HmacDRBG<D>
         let mut i = 0;
         while i < result.len() {
             let mut vmac = self.hmac();
-            vmac.input(self.v.code());
+            vmac.input(self.v.code_ref());
             self.v = vmac.result();
 
-            for j in 0..self.v.code().len() {
-                result[i + j] = self.v.code()[j];
+            for j in 0..self.v.code_ref().len() {
+                result[i + j] = self.v.code_ref()[j];
             }
-            i += self.v.code().len();
+            i += self.v.code_ref().len();
         }
 
         match add {
@@ -92,12 +113,16 @@ impl<D> HmacDRBG<D>
     }
 
     fn hmac(&self) -> Hmac<D> {
-        Hmac::new(self.k.code())
+        let kk:  &GenericArray<u8, D::OutputSize> = self.k.code_ref();
+        //let mut expanded = GenericArray::default();
+        //expanded[..kk.len()].copy_from_slice(kk);
+        let expanded = expand_key::<D>(kk);
+        Hmac::new(&expanded)
     }
 
     fn update(&mut self, seeds: Option<&[&[u8]]>) {
         let mut kmac = self.hmac();
-        kmac.input(self.v.code());
+        kmac.input(self.v.code_ref());
         kmac.input(&[0x00]);
         if let Some(seeds) = seeds {
             for seed in seeds {
@@ -107,7 +132,7 @@ impl<D> HmacDRBG<D>
         self.k = kmac.result();
 
         let mut vmac = self.hmac();
-        vmac.input(self.v.code());
+        vmac.input(self.v.code_ref());
         self.v = vmac.result();
 
         if seeds.is_none() {
@@ -117,7 +142,7 @@ impl<D> HmacDRBG<D>
         let seeds = seeds.unwrap();
 
         let mut kmac = self.hmac();
-        kmac.input(self.v.code());
+        kmac.input(self.v.code_ref());
         kmac.input(&[0x01]);
         for seed in seeds {
             kmac.input(seed);
@@ -125,7 +150,7 @@ impl<D> HmacDRBG<D>
         self.k = kmac.result();
 
         let mut vmac = self.hmac();
-        vmac.input(self.v.code());
+        vmac.input(self.v.code_ref());
         self.v = vmac.result();
     }
 }
